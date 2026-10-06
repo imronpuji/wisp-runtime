@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+results/
+*.u8
+*.u8.tmp
+.venv/
+venv*/
+.env
