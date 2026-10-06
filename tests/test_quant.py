@@ -1,12 +1,14 @@
-import torch, pytest
-from wisp.quant import quantize, dequant, expert_nbytes, _pack, _unpack
+import pytest
+import torch
+
+from wisp.quant import _pack, _unpack, dequant, expert_nbytes, quantize
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @pytest.mark.parametrize("bits", [8, 4, 3, 2])
 def test_pack_roundtrip(bits):
-    q = torch.randint(0, 2 ** bits, (4096,), dtype=torch.uint8, device=DEV)
+    q = torch.randint(0, 2**bits, (4096,), dtype=torch.uint8, device=DEV)
     assert torch.equal(_unpack(_pack(q, bits)[None], bits)[0].to(torch.uint8), q)
 
 
@@ -34,5 +36,5 @@ def test_error_monotonic():
 
 def test_compression_ratio():
     n = 1572864
-    assert expert_nbytes(n, 16, 128) == 9437184           # 9.0 MiB
+    assert expert_nbytes(n, 16, 128) == 9437184  # 9.0 MiB
     assert abs(expert_nbytes(n, 4, 128) / expert_nbytes(n, 16, 128) - 0.265) < 0.01

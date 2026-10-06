@@ -2,7 +2,9 @@
 
 Trace file (npz): ids int16 [T, L, k] = expert ids per decode step; meta: L, E.
 """
+
 import numpy as np
+
 from .cache_core import CacheCore
 
 
@@ -20,8 +22,20 @@ def top_keys(ids, L, E, n):
     return [int(k) for k in np.argsort(-cnt)[:n]]
 
 
-def simulate(ids, L, E, slots, policy="lru", miss_policy="transfer", decay=0.9995, n_static=0,
-             admit_after=2.0, chunk=8, warm_frac=0.25, profile_ids=None):
+def simulate(
+    ids,
+    L,
+    E,
+    slots,
+    policy="lru",
+    miss_policy="transfer",
+    decay=0.9995,
+    n_static=0,
+    admit_after=2.0,
+    chunk=8,
+    warm_frac=0.25,
+    profile_ids=None,
+):
     """Returns dict with per-token miss stats measured after the first `warm_frac` of steps."""
     T = ids.shape[0]
     core = CacheCore(slots, policy, decay, n_static, admit_after)
@@ -40,7 +54,7 @@ def simulate(ids, L, E, slots, policy="lru", miss_policy="transfer", decay=0.999
                 for k in mk:
                     s = core.admit(k, prot)
                     if s is not None:
-                        prot.add(s)   # admitted for future tokens; the CPU still computes it this time
+                        prot.add(s)  # admitted for future tokens; the CPU still computes it this time
                 m += len(mk)
             else:
                 _, loads = core.ensure(keys)
@@ -48,9 +62,15 @@ def simulate(ids, L, E, slots, policy="lru", miss_policy="transfer", decay=0.999
         miss[t] = m
     m = miss[warm:]
     total_keys = ids.shape[2] * L
-    return dict(slots=slots, policy=policy, miss_policy=miss_policy, misses_per_token=float(m.mean()),
-                hit_rate=float(1 - m.mean() / total_keys), tokens=int(len(m)),
-                evictions=core.stats["evictions"])
+    return dict(
+        slots=slots,
+        policy=policy,
+        miss_policy=miss_policy,
+        misses_per_token=float(m.mean()),
+        hit_rate=float(1 - m.mean() / total_keys),
+        tokens=int(len(m)),
+        evictions=core.stats["evictions"],
+    )
 
 
 def predict_tok_s(misses_per_token, expert_bytes, bw_gbs, t_compute_s, miss_policy="transfer", t_cpu_expert_s=0.0):

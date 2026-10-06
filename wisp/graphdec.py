@@ -17,6 +17,7 @@ Usage:   dec = GraphDecoder(model, rt, tmax); logits = prefill with HF; dec.load
          then  logits = dec.next(token_tensor)   # repeated
 Rebuilds itself if the expert cache is re-created (configure()).  Set use_graph=False to run the same code eagerly.
 """
+
 import torch
 import torch.nn.functional as F
 
@@ -51,11 +52,11 @@ class GraphDecoder:
         self.dt = dt
         d = dict(device=self.dev, dtype=dt)
         self.kc = self.vc = None
-        self.ctl = torch.zeros(2, dtype=torch.long, device=self.dev)       # [token, position]
+        self.ctl = torch.zeros(2, dtype=torch.long, device=self.dev)  # [token, position]
         self.pos = 0
         self._alloc(self.tmax)
-        self.hm = torch.zeros(1, 1, self.H, **d)                           # residual stream after attention
-        self.xn = torch.zeros(1, 1, self.H, **d)                           # MoE input
+        self.hm = torch.zeros(1, 1, self.H, **d)  # residual stream after attention
+        self.xn = torch.zeros(1, 1, self.H, **d)  # MoE input
         self.prefetch = bool(rt is not None and getattr(rt, "prefetch", False))
         self.row = torch.zeros(1, (3 if self.prefetch else 2) * self.k, dtype=torch.float32, device=self.dev)
         self.logits = torch.zeros(1, cfg.vocab_size, **d)
@@ -72,14 +73,16 @@ class GraphDecoder:
             k = torch.zeros(1, self.Hk, tmax, self.D, **d)
             v = torch.zeros(1, self.Hk, tmax, self.D, **d)
             if old_k is not None and keep:
-                k[:, :, :keep].copy_(old_k[i][:, :, :keep]); v[:, :, :keep].copy_(old_v[i][:, :, :keep])
-                old_k[i] = old_v[i] = None                     # free layer by layer: peak = old + one layer
-            self.kc.append(k); self.vc.append(v)
+                k[:, :, :keep].copy_(old_k[i][:, :, :keep])
+                v[:, :, :keep].copy_(old_v[i][:, :, :keep])
+                old_k[i] = old_v[i] = None  # free layer by layer: peak = old + one layer
+            self.kc.append(k)
+            self.vc.append(v)
         self.tmax, self.pos = tmax, keep
         self.ar = torch.arange(tmax, device=self.dev)
         pos = torch.arange(tmax, device=self.dev)[None]
         cos, sin = self.model.model.rotary_emb(torch.zeros(1, 1, self.H, **d), pos)
-        self.cos, self.sin = cos[0].contiguous(), sin[0].contiguous()      # [tmax, D]
+        self.cos, self.sin = cos[0].contiguous(), sin[0].contiguous()  # [tmax, D]
 
     def resize(self, tmax):
         """Change the context capacity (graphs are re-captured on the next step)."""
@@ -98,17 +101,18 @@ class GraphDecoder:
         """Run tokens `ids` (LongTensor [T]) at positions start..start+T-1, writing K/V straight into the static
         buffers (no second KV copy), in chunks. KV before `start` is reused. Returns logits [1, V] of the last token."""
         from transformers.models.qwen3_moe import modeling_qwen3_moe as m
+
         start = self.pos if start is None else start
         ids = ids.reshape(-1).to(self.dev)
         assert start + ids.numel() <= self.tmax, f"context {start + ids.numel()} > capacity {self.tmax}"
         try:
             from torch.nn.attention.bias import causal_lower_right
-        except Exception:                                    # pragma: no cover
+        except Exception:  # pragma: no cover
             causal_lower_right = None
         Hq, Hk, D, G = self.Hq, self.Hk, self.D, self.G
         logits = None
         for c0 in range(0, ids.numel(), chunk):
-            part = ids[c0:c0 + chunk]
+            part = ids[c0 : c0 + chunk]
             T, s0 = part.numel(), start + c0
             Lk = s0 + T
             h = self.model.model.embed_tokens(part.view(1, T))
@@ -116,7 +120,7 @@ class GraphDecoder:
             if causal_lower_right is not None:
                 bias = causal_lower_right(T, Lk)
             else:
-                bias = (torch.arange(Lk, device=self.dev)[None] <= torch.arange(s0, Lk, device=self.dev)[:, None])
+                bias = torch.arange(Lk, device=self.dev)[None] <= torch.arange(s0, Lk, device=self.dev)[:, None]
             for i, L in enumerate(self.layers):
                 at = L.self_attn
                 xn = L.input_layernorm(h)
@@ -127,11 +131,18 @@ class GraphDecoder:
                 self.kc[i][:, :, s0:Lk].copy_(k)
                 self.vc[i][:, :, s0:Lk].copy_(v)
                 outs = []
-                for g in range(Hk):                          # one KV head at a time: no repeat_kv copy of the whole cache
-                    kk = self.kc[i][:, g:g + 1, :Lk].expand(1, G, Lk, D).contiguous()
-                    vv = self.vc[i][:, g:g + 1, :Lk].expand(1, G, Lk, D).contiguous()
-                    outs.append(F.scaled_dot_product_attention(q[:, g * G:(g + 1) * G].contiguous(), kk, vv,
-                                                               attn_mask=bias, scale=getattr(at, "scaling", D ** -0.5)))
+                for g in range(Hk):  # one KV head at a time: no repeat_kv copy of the whole cache
+                    kk = self.kc[i][:, g : g + 1, :Lk].expand(1, G, Lk, D).contiguous()
+                    vv = self.vc[i][:, g : g + 1, :Lk].expand(1, G, Lk, D).contiguous()
+                    outs.append(
+                        F.scaled_dot_product_attention(
+                            q[:, g * G : (g + 1) * G].contiguous(),
+                            kk,
+                            vv,
+                            attn_mask=bias,
+                            scale=getattr(at, "scaling", D**-0.5),
+                        )
+                    )
                 o = torch.cat(outs, 1).transpose(1, 2).reshape(1, T, Hq * D)
                 h = h + at.o_proj(o)
                 y = L.mlp(L.post_attention_layernorm(h))
@@ -153,35 +164,42 @@ class GraphDecoder:
         cos = self.cos.index_select(0, pos).view(1, 1, D)
         sin = self.sin.index_select(0, pos).view(1, 1, D)
         from .kernels import rope_decode
+
         q, kk = rope_decode(q, kk, cos, sin)
         self.kc[i].index_copy_(2, pos, kk)
         self.vc[i].index_copy_(2, pos, v)
         mask = (self.ar <= pos).view(1, 1, 1, -1)
-        o = F.scaled_dot_product_attention(q.reshape(1, Hk, G, D), self.kc[i], self.vc[i], attn_mask=mask,
-                                           scale=getattr(at, "scaling", D ** -0.5))
+        o = F.scaled_dot_product_attention(
+            q.reshape(1, Hk, G, D), self.kc[i], self.vc[i], attn_mask=mask, scale=getattr(at, "scaling", D**-0.5)
+        )
         hm = h + at.o_proj(o.reshape(1, 1, Hq * D))
         xn2 = L.post_attention_layernorm(hm)
         rw = F.softmax(blk.gate(xn2.view(1, H)), dim=1, dtype=torch.float32)
         rw, sel = torch.topk(rw, k, dim=-1)
         if blk.norm_topk:
             rw = rw / rw.sum(dim=-1, keepdim=True)
-        rw = rw.to(xn2.dtype)                                    # same rounding as the eager path
+        rw = rw.to(xn2.dtype)  # same rounding as the eager path
         parts = [sel.float(), rw.float()]
         if self.prefetch:
             ng = getattr(blk, "next_gate", None)
-            parts.append(torch.topk(ng(xn2.view(1, H)), k, dim=-1).indices.float() if ng is not None
-                         else torch.zeros(1, k, device=self.dev))
+            parts.append(
+                torch.topk(ng(xn2.view(1, H)), k, dim=-1).indices.float()
+                if ng is not None
+                else torch.zeros(1, k, device=self.dev)
+            )
         self.hm.copy_(hm)
         self.xn.copy_(xn2)
         self.row.copy_(torch.cat(parts, 1))
 
     def _moe(self, i):
         """MoE of layer i from the static buffers -> [1,1,H]. Overridable for tests."""
-        from .kernels import moe_decode_q4_fast, moe_decode_q3_fast
+        from .kernels import moe_decode_q3_fast, moe_decode_q4_fast
+
         c = self.rt.cache
         fn = moe_decode_q4_fast if c.store.bits == 4 else moe_decode_q3_fast
-        y = fn(c.gpu, self.meta_dev, self.xn.view(self.H), self.k, c.store.n, self.H, self.layers[i].mlp.I,
-               c.store.group)
+        y = fn(
+            c.gpu, self.meta_dev, self.xn.view(self.H), self.k, c.store.n, self.H, self.layers[i].mlp.I, c.store.group
+        )
         return y.view(1, 1, self.H)
 
     def _seg(self, j):
@@ -201,18 +219,19 @@ class GraphDecoder:
         base = i * self.E
         if rt.recorder is not None:
             import numpy as np
+
             rt.recorder.append((i, np.array([ex])))
         st = rt.stats
         st["layer_calls"] += 1
         slots = cache.ensure([base + e for e in ex])
         hn = self.meta_host.numpy()
         hn[:k] = slots
-        hn[k:] = row[k:2 * k]
+        hn[k:] = row[k : 2 * k]
         self.meta_dev.copy_(self.meta_host, non_blocking=True)  # ordered before the next replay on this stream
         st["gpu_experts"] += k
         if self.prefetch and i < self.L - 1:
             nb = (i + 1) * self.E
-            st["prefetched"] += cache.prefetch([nb + int(e) for e in set(row[2 * k:3 * k])], list(slots))
+            st["prefetched"] += cache.prefetch([nb + int(e) for e in set(row[2 * k : 3 * k])], list(slots))
 
     # ---------------------------------------------------------------- capture / run
     def _cache_key(self):
@@ -239,7 +258,7 @@ class GraphDecoder:
         torch.cuda.synchronize()
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):                       # warm-up: compiles the Triton kernels, inits cuBLAS
+        with torch.cuda.stream(s):  # warm-up: compiles the Triton kernels, inits cuBLAS
             for _ in range(2):
                 for j in range(self.L + 1):
                     self._seg(j)
@@ -283,7 +302,7 @@ class GraphDecoder:
         self.ctl[1].fill_(self.pos)
         self._run(0)
         for i in range(self.L):
-            self._prepare(i, self.row.cpu()[0].tolist())     # the one sync per layer
+            self._prepare(i, self.row.cpu()[0].tolist())  # the one sync per layer
             self._run(i + 1)
         self.pos += 1
         return self.logits

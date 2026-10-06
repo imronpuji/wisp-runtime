@@ -11,16 +11,28 @@ when e is even and the high nibble when odd; group g = e // G covers G consecuti
 
 Dequant per group is folded into the dot product:  sum_i (q_i*s + m) x_i = s * (q . x) + m * sum(x).
 """
+
 import torch
 import triton
 import triton.language as tl
 
 
 @triton.jit
-def _gate_up_kernel(pool_ptr, slots_ptr, x_ptr, out_ptr,
-                    NBYTES: tl.constexpr, NCODE: tl.constexpr, NG: tl.constexpr, NHALF: tl.constexpr,
-                    NGM: tl.constexpr, H: tl.constexpr, I: tl.constexpr, GROUP: tl.constexpr,
-                    BLOCK_R: tl.constexpr):
+def _gate_up_kernel(
+    pool_ptr,
+    slots_ptr,
+    x_ptr,
+    out_ptr,
+    NBYTES: tl.constexpr,
+    NCODE: tl.constexpr,
+    NG: tl.constexpr,
+    NHALF: tl.constexpr,
+    NGM: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
     pid_r = tl.program_id(0)
     j = tl.program_id(1)
     slot = tl.load(slots_ptr + j).to(tl.int64)
@@ -58,10 +70,21 @@ def _gate_up_kernel(pool_ptr, slots_ptr, x_ptr, out_ptr,
 
 
 @triton.jit
-def _down_kernel(pool_ptr, slots_ptr, a_ptr, out_ptr,
-                 NBYTES: tl.constexpr, NCODE: tl.constexpr, NG: tl.constexpr, NHALF: tl.constexpr,
-                 NGM: tl.constexpr, H: tl.constexpr, I: tl.constexpr, GROUP: tl.constexpr,
-                 BLOCK_R: tl.constexpr):
+def _down_kernel(
+    pool_ptr,
+    slots_ptr,
+    a_ptr,
+    out_ptr,
+    NBYTES: tl.constexpr,
+    NCODE: tl.constexpr,
+    NG: tl.constexpr,
+    NHALF: tl.constexpr,
+    NGM: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
     pid_r = tl.program_id(0)
     j = tl.program_id(1)
     slot = tl.load(slots_ptr + j).to(tl.int64)
@@ -95,8 +118,17 @@ def moe_decode_q4(pool, slots, x, w, n, H, I, group=128, block_r=32, num_warps=4
     assert H % group == 0 and I % group == 0 and n == H * I
     k = slots.numel()
     nbytes = pool.shape[1]
-    meta = dict(NBYTES=nbytes, NCODE=3 * n // 2, NG=3 * n // group, NHALF=n // 2, NGM=n // group,
-                H=H, I=I, GROUP=group, BLOCK_R=block_r)
+    meta = dict(
+        NBYTES=nbytes,
+        NCODE=3 * n // 2,
+        NG=3 * n // group,
+        NHALF=n // 2,
+        NGM=n // group,
+        H=H,
+        I=I,
+        GROUP=group,
+        BLOCK_R=block_r,
+    )
     x = x.contiguous()
     a = torch.empty((k, I), dtype=torch.float32, device=x.device)
     _gate_up_kernel[(triton.cdiv(I, block_r), k)](pool, slots, x, a, num_warps=num_warps, **meta)
@@ -106,10 +138,22 @@ def moe_decode_q4(pool, slots, x, w, n, H, I, group=128, block_r=32, num_warps=4
 
 
 @triton.jit
-def _down_sum_kernel(pool_ptr, meta_ptr, a_ptr, out_ptr,
-                     NBYTES: tl.constexpr, NCODE: tl.constexpr, NG: tl.constexpr, NHALF: tl.constexpr,
-                     NGM: tl.constexpr, H: tl.constexpr, I: tl.constexpr, GROUP: tl.constexpr,
-                     K: tl.constexpr, BLOCK_R: tl.constexpr):
+def _down_sum_kernel(
+    pool_ptr,
+    meta_ptr,
+    a_ptr,
+    out_ptr,
+    NBYTES: tl.constexpr,
+    NCODE: tl.constexpr,
+    NG: tl.constexpr,
+    NHALF: tl.constexpr,
+    NGM: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    GROUP: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
     """out[h] = sum_j w_j * (Wd_j[h,:] . a_j): all experts reduced inside the kernel, result written once."""
     pid_r = tl.program_id(0)
     HALF: tl.constexpr = GROUP // 2
@@ -146,20 +190,23 @@ def moe_decode_q4_fast(pool, meta, x, k, n, H, I, group=128, block_gu=32, block_
     meta: float32 [2k] on the GPU = [slot_0..slot_{k-1}, w_0..w_{k-1}]. Returns [H] in x.dtype."""
     assert H % group == 0 and I % group == 0 and n == H * I
     nbytes = pool.shape[1]
-    meta_kw = dict(NBYTES=nbytes, NCODE=3 * n // 2, NG=3 * n // group, NHALF=n // 2, NGM=n // group,
-                   H=H, I=I, GROUP=group)
+    meta_kw = dict(
+        NBYTES=nbytes, NCODE=3 * n // 2, NG=3 * n // group, NHALF=n // 2, NGM=n // group, H=H, I=I, GROUP=group
+    )
     x = x.contiguous()
     a = torch.empty((k, I), dtype=torch.float32, device=x.device)
     _gate_up_kernel[(triton.cdiv(I, block_gu), k)](pool, meta, x, a, num_warps=num_warps, BLOCK_R=block_gu, **meta_kw)
     out = torch.empty((H,), dtype=x.dtype, device=x.device)
-    _down_sum_kernel[(triton.cdiv(H, block_down),)](pool, meta, a, out, num_warps=num_warps,
-                                                    K=k, BLOCK_R=block_down, **meta_kw)
+    _down_sum_kernel[(triton.cdiv(H, block_down),)](
+        pool, meta, a, out, num_warps=num_warps, K=k, BLOCK_R=block_down, **meta_kw
+    )
     return out
 
 
 # ---------------------------------------------------------------------------------------------
 # 3-bit variant. Codes are a little-endian bit stream over the 3n elements of an expert (see quant._pack):
-# element e lives at bit 3e, so it is always inside two adjacent bytes: q = ((b[p>>3] | b[(p>>3)+1] << 8) >> (p & 7)) & 7.
+# element e lives at bit p = 3e, so it is always inside two adjacent bytes:
+#   q = ((b[p>>3] | b[(p>>3)+1] << 8) >> (p & 7)) & 7
 # ---------------------------------------------------------------------------------------------
 @triton.jit
 def _q3(base, e, mask):
@@ -171,10 +218,21 @@ def _q3(base, e, mask):
 
 
 @triton.jit
-def _gate_up_kernel3(pool_ptr, meta_ptr, x_ptr, out_ptr,
-                     NBYTES: tl.constexpr, NCODE: tl.constexpr, NG: tl.constexpr, N: tl.constexpr,
-                     NGM: tl.constexpr, H: tl.constexpr, I: tl.constexpr, GROUP: tl.constexpr,
-                     BLOCK_R: tl.constexpr):
+def _gate_up_kernel3(
+    pool_ptr,
+    meta_ptr,
+    x_ptr,
+    out_ptr,
+    NBYTES: tl.constexpr,
+    NCODE: tl.constexpr,
+    NG: tl.constexpr,
+    N: tl.constexpr,
+    NGM: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
     pid_r = tl.program_id(0)
     j = tl.program_id(1)
     slot = tl.load(meta_ptr + j).to(tl.int64)
@@ -206,10 +264,22 @@ def _gate_up_kernel3(pool_ptr, meta_ptr, x_ptr, out_ptr,
 
 
 @triton.jit
-def _down_sum_kernel3(pool_ptr, meta_ptr, a_ptr, out_ptr,
-                      NBYTES: tl.constexpr, NCODE: tl.constexpr, NG: tl.constexpr, N: tl.constexpr,
-                      NGM: tl.constexpr, H: tl.constexpr, I: tl.constexpr, GROUP: tl.constexpr,
-                      K: tl.constexpr, BLOCK_R: tl.constexpr):
+def _down_sum_kernel3(
+    pool_ptr,
+    meta_ptr,
+    a_ptr,
+    out_ptr,
+    NBYTES: tl.constexpr,
+    NCODE: tl.constexpr,
+    NG: tl.constexpr,
+    N: tl.constexpr,
+    NGM: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    GROUP: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
     pid_r = tl.program_id(0)
     GPR: tl.constexpr = I // GROUP
     rows = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
@@ -246,8 +316,9 @@ def moe_decode_q3_fast(pool, meta, x, k, n, H, I, group=128, block_gu=8, block_d
     a = torch.empty((k, I), dtype=torch.float32, device=x.device)
     _gate_up_kernel3[(triton.cdiv(I, block_gu), k)](pool, meta, x, a, num_warps=num_warps, BLOCK_R=block_gu, **kw)
     out = torch.empty((H,), dtype=x.dtype, device=x.device)
-    _down_sum_kernel3[(triton.cdiv(H, block_down),)](pool, meta, a, out, num_warps=num_warps,
-                                                     K=k, BLOCK_R=block_down, **kw)
+    _down_sum_kernel3[(triton.cdiv(H, block_down),)](
+        pool, meta, a, out, num_warps=num_warps, K=k, BLOCK_R=block_down, **kw
+    )
     return out
 
 
@@ -255,8 +326,7 @@ def moe_decode_q3_fast(pool, meta, x, k, n, H, I, group=128, block_gu=8, block_d
 # Rotary embedding for 1-token decode: q and k rotated in ONE launch (HF needs ~10 small kernels).
 # ---------------------------------------------------------------------------------------------
 @triton.jit
-def _rope_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, SQ, SK,
-                 HQ: tl.constexpr, D: tl.constexpr):
+def _rope_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, SQ, SK, HQ: tl.constexpr, D: tl.constexpr):
     pid = tl.program_id(0)
     idx = tl.arange(0, D)
     half: tl.constexpr = D // 2
@@ -268,10 +338,12 @@ def _rope_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, SQ, SK,
     is_k = pid >= HQ
     hq = pid
     hk = pid - HQ
-    x = (tl.load(q_ptr + hq * SQ + idx, mask=is_q, other=0.0).to(tl.float32)
-         + tl.load(k_ptr + hk * SK + idx, mask=is_k, other=0.0).to(tl.float32))
-    xp = (tl.load(q_ptr + hq * SQ + partner, mask=is_q, other=0.0).to(tl.float32)
-          + tl.load(k_ptr + hk * SK + partner, mask=is_k, other=0.0).to(tl.float32))
+    x = tl.load(q_ptr + hq * SQ + idx, mask=is_q, other=0.0).to(tl.float32) + tl.load(
+        k_ptr + hk * SK + idx, mask=is_k, other=0.0
+    ).to(tl.float32)
+    xp = tl.load(q_ptr + hq * SQ + partner, mask=is_q, other=0.0).to(tl.float32) + tl.load(
+        k_ptr + hk * SK + partner, mask=is_k, other=0.0
+    ).to(tl.float32)
     out = x * c + sign * xp * s
     tl.store(qo_ptr + hq * D + idx, out, mask=is_q)
     tl.store(ko_ptr + hk * D + idx, out, mask=is_k)
@@ -283,6 +355,17 @@ def rope_decode(q, k, cos, sin):
     Hk = k.shape[1]
     qo = torch.empty((1, Hq, 1, D), dtype=q.dtype, device=q.device)
     ko = torch.empty((1, Hk, 1, D), dtype=k.dtype, device=k.device)
-    _rope_kernel[(Hq + Hk,)](q, k, cos.reshape(-1).contiguous(), sin.reshape(-1).contiguous(), qo, ko,
-                             q.stride(1), k.stride(1), HQ=Hq, D=D, num_warps=1)
+    _rope_kernel[(Hq + Hk,)](
+        q,
+        k,
+        cos.reshape(-1).contiguous(),
+        sin.reshape(-1).contiguous(),
+        qo,
+        ko,
+        q.stride(1),
+        k.stride(1),
+        HQ=Hq,
+        D=D,
+        num_warps=1,
+    )
     return qo, ko

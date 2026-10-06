@@ -1,17 +1,29 @@
 """Record which experts are used at every decode step (routing trace) -> data/trace_b{bits}.npz"""
-import argparse, os, sys
+
+import argparse
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import numpy as np, torch
+import numpy as np
+
 from wisp import runner
-from wisp.model import configure, nbytes_of
 from wisp.budget import plan_slots
+from wisp.model import configure, nbytes_of
+
+
+def hit_rate(st):
+    return st["hits"] / max(1, st["hits"] + st["misses"])
+
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--model-dir", default=os.environ.get("WISP_MODEL", "/workspace/models/Qwen3-30B-A3B"))
+ap.add_argument("--model-dir", default=os.environ.get("WISP_MODEL"))
 ap.add_argument("--bits", type=int, default=4)
 ap.add_argument("--vram-gb", type=float, default=22)
-ap.add_argument("--n-prompts", type=int, default=64); ap.add_argument("--n-new", type=int, default=96)
-ap.add_argument("--prompt-tokens", type=int, default=128); ap.add_argument("--offset", type=int, default=0)
+ap.add_argument("--n-prompts", type=int, default=64)
+ap.add_argument("--n-new", type=int, default=96)
+ap.add_argument("--prompt-tokens", type=int, default=128)
+ap.add_argument("--offset", type=int, default=0)
 ap.add_argument("--prompts", default="data/prompts.jsonl")
 ap.add_argument("--out", default=None)
 a = ap.parse_args()
@@ -26,11 +38,15 @@ steps, pid = [], []
 for i, (dom, ids) in enumerate(prompts):
     rt.recorder = []
     runner.generate_timed(model, ids, a.n_new)
-    rec = [s for (l, s) in rt.recorder if s.shape[0] == 1]     # decode calls only
-    arr = np.stack(rec).reshape(-1, L, k)                        # [tokens, L, k]
-    steps.append(arr.astype(np.int16)); pid += [i] * arr.shape[0]
-    print(f"[trace] prompt {i+1}/{len(prompts)} ({dom}): {arr.shape[0]} decode steps, "
-          f"hit_rate={rt.cache.core.stats['hits']/max(1,rt.cache.core.stats['hits']+rt.cache.core.stats['misses']):.3f}", flush=True)
+    rec = [s for (l, s) in rt.recorder if s.shape[0] == 1]  # decode calls only
+    arr = np.stack(rec).reshape(-1, L, k)  # [tokens, L, k]
+    steps.append(arr.astype(np.int16))
+    pid += [i] * arr.shape[0]
+    print(
+        f"[trace] prompt {i + 1}/{len(prompts)} ({dom}): {arr.shape[0]} decode steps, "
+        f"hit_rate={hit_rate(rt.cache.core.stats):.3f}",
+        flush=True,
+    )
 rt.recorder = None
 ids = np.concatenate(steps)
 os.makedirs(os.path.dirname(out), exist_ok=True)

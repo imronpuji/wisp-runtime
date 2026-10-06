@@ -1,13 +1,21 @@
 """Shows the ACTUAL error of the paged model vs HF reference on a tiny model, plus a sabotage control."""
-import sys, os
+
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
-import torch
 import test_paged_moe as T
+import torch
+
 from wisp.cache import ExpertCache
 
-for name, kw in [("all-resident", dict(nslots=24)), ("thrash lru", dict(nslots=6)),
-                 ("hybrid", dict(nslots=6, miss="hybrid")), ("prefetch", dict(nslots=8, prefetch=True))]:
+for name, kw in [
+    ("all-resident", dict(nslots=24)),
+    ("thrash lru", dict(nslots=6)),
+    ("hybrid", dict(nslots=6, miss="hybrid")),
+    ("prefetch", dict(nslots=8, prefetch=True)),
+]:
     model, cfg = T.tiny()
     ids = torch.randint(0, 256, (1, 14), device="cuda")
     with torch.no_grad():
@@ -16,8 +24,10 @@ for name, kw in [("all-resident", dict(nslots=24)), ("thrash lru", dict(nslots=6
     got = T.logits(model, ids, 9)
     e = (got - ref).abs().max().item()
     s = rt.stats
-    print(f"{name:13s} max|err|={e:.4f} ref_scale={ref.abs().max().item():.2f} "
-          f"misses={rt.cache.core.stats['misses']} cpu_experts={s['cpu_experts']} prefetched={s['prefetched']}")
+    print(
+        f"{name:13s} max|err|={e:.4f} ref_scale={ref.abs().max().item():.2f} "
+        f"misses={rt.cache.core.stats['misses']} cpu_experts={s['cpu_experts']} prefetched={s['prefetched']}"
+    )
 
 model, cfg = T.tiny()
 ids = torch.randint(0, 256, (1, 14), device="cuda")

@@ -5,7 +5,11 @@ halves of gate_up and down are n = H*I elements, so an expert fits the framework
     [ gate_up.flat[:n] | gate_up.flat[n:] | down.flat ]
 and the whole store/cache/quantizer is reused unchanged. The (tiny) biases stay on the GPU for all experts.
 This block uses plain torch ops on the dequantized experts (no fused kernel yet): correct first, fast later."""
-import json, os, time
+
+import json
+import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,7 +43,7 @@ def _layer_tensors(get, has, l, E, device):
     if has(p + "gate_up_proj_blocks"):
         gu = mxfp4_to_bf16(get(p + "gate_up_proj_blocks").to(device), get(p + "gate_up_proj_scales").to(device))
         dn = mxfp4_to_bf16(get(p + "down_proj_blocks").to(device), get(p + "down_proj_scales").to(device))
-        gu, dn = gu.transpose(1, 2).contiguous(), dn.transpose(1, 2).contiguous()   # [E,out,K] -> [E,K,out]
+        gu, dn = gu.transpose(1, 2).contiguous(), dn.transpose(1, 2).contiguous()  # [E,out,K] -> [E,K,out]
     else:
         gu, dn = get(p + "gate_up_proj").to(device), get(p + "down_proj").to(device)
     return gu, dn, get(p + "gate_up_proj_bias"), get(p + "down_proj_bias")
@@ -47,6 +51,7 @@ def _layer_tensors(get, has, l, E, device):
 
 def _reader(model_dir):
     from safetensors import safe_open
+
     idx = json.load(open(os.path.join(model_dir, "model.safetensors.index.json")))["weight_map"]
     handles = {}
 
@@ -79,7 +84,7 @@ def build_store(model_dir, cfg, bits, group=128, device="cuda", cache_dir=None, 
             st.put(l, e, expert_w3(gu[e], dn[e]), device)
         del gu, dn
         if l % 4 == 3 or l == L - 1:
-            print(f"[store] gpt-oss bits={bits} layer {l+1}/{L}  {time.time()-t0:.0f}s", flush=True)
+            print(f"[store] gpt-oss bits={bits} layer {l + 1}/{L}  {time.time() - t0:.0f}s", flush=True)
     if path:
         st._save(path)
     return st
@@ -94,7 +99,9 @@ class PagedGptOssBlock(nn.Module):
         self.E, self.top_k = cfg.num_local_experts, cfg.num_experts_per_tok
         self.H, self.I = cfg.hidden_size, cfg.intermediate_size
         self.alpha, self.limit = 1.702, float(getattr(cfg, "swiglu_limit", 7.0))
-        self.register_buffer("gub", torch.zeros(self.E, 2 * self.I, dtype=torch.bfloat16, device=device), persistent=False)
+        self.register_buffer(
+            "gub", torch.zeros(self.E, 2 * self.I, dtype=torch.bfloat16, device=device), persistent=False
+        )
         self.register_buffer("db", torch.zeros(self.E, self.H, dtype=torch.bfloat16, device=device), persistent=False)
 
     def _act(self, gu):
@@ -113,21 +120,21 @@ class PagedGptOssBlock(nn.Module):
         rt.stats["layer_calls"] += 1
         if rt.recorder is not None:
             rt.recorder.append((self.layer_idx, ti.cpu().numpy().copy()))
-        if N == 1:                                           # decode: one sync, all k experts in 2 bmm
+        if N == 1:  # decode: one sync, all k experts in 2 bmm
             ex = ti[0].tolist()
             slots = cache.ensure([base + e for e in ex])
-            W = cache.weights_batched(torch.as_tensor(slots, device=x.device))            # [k,3,n]
+            W = cache.weights_batched(torch.as_tensor(slots, device=x.device))  # [k,3,n]
             gu = torch.bmm(x.unsqueeze(0).expand(k, 1, H), W[:, :2].reshape(k, H, 2 * I)) + self.gub[ti[0]].unsqueeze(1)
             out = torch.bmm(self._act(gu), W[:, 2].reshape(k, I, H)) + self.db[ti[0]].unsqueeze(1)
             y = (out[:, 0] * sc[0].unsqueeze(-1)).sum(0, keepdim=True)
             rt.stats["gpu_experts"] += k
-        else:                                                # prefill: group tokens per expert, page in chunks
+        else:  # prefill: group tokens per expert, page in chunks
             y = torch.zeros_like(x)
             uniq = torch.unique(ti).tolist()
             for i in range(0, len(uniq), rt.chunk):
-                ce = uniq[i:i + rt.chunk]
+                ce = uniq[i : i + rt.chunk]
                 Ws = cache.weights(cache.ensure([base + e for e in ce]))
-                for e, W3 in zip(ce, Ws):
+                for e, W3 in zip(ce, Ws, strict=True):
                     tok, pos = torch.where(ti == e)
                     gu = x[tok] @ torch.cat([W3[0], W3[1]]).view(H, 2 * I) + self.gub[e]
                     out = self._act(gu) @ W3[2].view(I, H) + self.db[e]
@@ -139,7 +146,9 @@ class PagedGptOssBlock(nn.Module):
 def load_skeleton_gptoss(model_dir, rt, device="cuda"):
     """Meta-init HF gpt-oss, swap every MLP for a paged block, load all non-expert tensors and the expert biases."""
     from transformers import AutoConfig, AutoModelForCausalLM
+
     from .model import nbytes_of
+
     cfg = AutoConfig.from_pretrained(model_dir)
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch.bfloat16)
@@ -150,6 +159,7 @@ def load_skeleton_gptoss(model_dir, rt, device="cuda"):
         blocks.append(blk)
     get, has, idx = _reader(model_dir)
     from safetensors import safe_open
+
     wanted = {k: f for k, f in idx.items() if ".mlp.experts." not in k}
     sd, t0 = {}, time.time()
     for f in sorted(set(wanted.values())):
@@ -166,5 +176,8 @@ def load_skeleton_gptoss(model_dir, rt, device="cuda"):
         blk.db.copy_(get(p + "down_proj_bias").to(device))
     model.model.rotary_emb = type(model.model.rotary_emb)(config=cfg, device=device)
     model.eval()
-    print(f"[model] gpt-oss non-expert weights on {device}: {nbytes_of(model)/2**30:.2f} GiB ({time.time()-t0:.0f}s)", flush=True)
+    print(
+        f"[model] gpt-oss non-expert weights on {device}: {nbytes_of(model) / 2**30:.2f} GiB ({time.time() - t0:.0f}s)",
+        flush=True,
+    )
     return model, cfg

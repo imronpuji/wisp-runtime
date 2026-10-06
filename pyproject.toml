@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wisp-runtime"
+version = "0.1.0"
+description = "Run large Mixture-of-Experts LLMs on small GPUs by paging experts from CPU RAM"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Muhamad Imron" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "triton>=3.0",
+    "transformers>=4.55",
+    "safetensors",
+    "numpy",
+]
+
+[project.optional-dependencies]
+eval = ["datasets", "pandas", "scipy"]
+dev = ["pytest", "ruff"]
+
+[project.urls]
+Repository = "https://github.com/imronpuji/wisp-runtime"
+
+[tool.setuptools]
+packages = ["wisp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# E741: I, H, L are the standard names for model dimensions here.
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# scripts and tests put the repo root on sys.path before importing wisp
+"scripts/*" = ["E402"]
+"tests/*" = ["E402"]
+# micro-benchmarks define timing lambdas inside loops and call them immediately
+"scripts/{dequant_bench,fused_bench,microbench}.py" = ["E402", "E731", "B023"]

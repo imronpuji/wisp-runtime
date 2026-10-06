@@ -6,7 +6,9 @@ Policies for the dynamic region:
   lru : evict least recently used
   wsa : evict lowest exponentially-decayed access frequency (working-set style)
 """
+
 from collections import defaultdict
+
 import numpy as np
 
 
@@ -57,7 +59,7 @@ class CacheCore:
         for s, k in enumerate(keys):
             self.slot_key[s] = k
             self.key2slot[k] = s
-        return [(k, s) for s, k in enumerate(keys)]   # (key, slot), same order as ensure()'s loads
+        return [(k, s) for s, k in enumerate(keys)]  # (key, slot), same order as ensure()'s loads
 
     def acquire(self, key, protected):
         """Pick a slot for `key` (evicting if needed, never a slot in `protected`)."""
@@ -84,22 +86,29 @@ class CacheCore:
     # -- high level --------------------------------------------------------
     def ensure(self, keys):
         """Transfer policy: make every key resident. Returns (slots aligned with keys, [(key, slot)] to load)."""
-        self.step(); self.note(keys)
+        self.step()
+        self.note(keys)
         self.stats["calls"] += 1
         slots, loads, prot = [None] * len(keys), [], set()
         for i, k in enumerate(keys):
             s = self.key2slot.get(k)
             if s is not None:
-                slots[i] = s; prot.add(s); self.stats["hits"] += 1
+                slots[i] = s
+                prot.add(s)
+                self.stats["hits"] += 1
         for i, k in enumerate(keys):
             if slots[i] is None:
                 s = self.acquire(k, prot)
-                slots[i] = s; prot.add(s); loads.append((k, s)); self.stats["misses"] += 1
+                slots[i] = s
+                prot.add(s)
+                loads.append((k, s))
+                self.stats["misses"] += 1
         return slots, loads
 
     def split(self, keys):
         """Hybrid policy: return (hit_keys, hit_slots, miss_keys); nothing is loaded."""
-        self.step(); self.note(keys)
+        self.step()
+        self.note(keys)
         self.stats["calls"] += 1
         hk, hs, mk = [], [], []
         for k in keys:
@@ -107,8 +116,10 @@ class CacheCore:
             if s is None:
                 mk.append(k)
             else:
-                hk.append(k); hs.append(s)
-        self.stats["hits"] += len(hk); self.stats["misses"] += len(mk)
+                hk.append(k)
+                hs.append(s)
+        self.stats["hits"] += len(hk)
+        self.stats["misses"] += len(mk)
         return hk, hs, mk
 
     def admit(self, key, protected):

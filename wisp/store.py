@@ -1,6 +1,11 @@
 """Host-side (pinned RAM) store of all experts, quantized to `bits`."""
-import json, os, time
+
+import json
+import os
+import time
+
 import torch
+
 from .quant import expert_nbytes, quantize
 
 
@@ -16,11 +21,15 @@ class ExpertStore:
             print(f"[store] pin_memory failed ({e}); falling back to pageable memory", flush=True)
             self.host = torch.empty((n_layers * n_experts, self.nbytes), dtype=torch.uint8)
             self.pinned = False
-        print(f"[store] allocated {self.host.numel()/2**30:.1f} GiB host (pinned={self.pinned}) in {time.time()-t:.1f}s", flush=True)
+        print(
+            f"[store] allocated {self.host.numel() / 2**30:.1f} GiB host (pinned={self.pinned}) "
+            f"in {time.time() - t:.1f}s",
+            flush=True,
+        )
 
     @property
     def total_gib(self):
-        return self.host.numel() / 2 ** 30
+        return self.host.numel() / 2**30
 
     def key(self, l, e):
         return l * self.E + e
@@ -45,6 +54,7 @@ class ExpertStore:
     @classmethod
     def from_safetensors(cls, model_dir, cfg, bits, group=128, device="cuda", cache_dir=None, pin=True):
         from safetensors import safe_open
+
         L, E = cfg.num_hidden_layers, cfg.num_experts
         n = cfg.moe_intermediate_size * cfg.hidden_size
         st = cls(L, E, n, bits, group, pin)
@@ -68,12 +78,16 @@ class ExpertStore:
         for l in range(L):
             for e in range(E):
                 p = f"model.layers.{l}.mlp.experts.{e}."
-                w3 = torch.stack([get(p + "gate_proj.weight").reshape(-1),
-                                  get(p + "up_proj.weight").reshape(-1),
-                                  get(p + "down_proj.weight").reshape(-1)])
+                w3 = torch.stack(
+                    [
+                        get(p + "gate_proj.weight").reshape(-1),
+                        get(p + "up_proj.weight").reshape(-1),
+                        get(p + "down_proj.weight").reshape(-1),
+                    ]
+                )
                 st.put(l, e, w3, device)
             if l % 4 == 3 or l == L - 1:
-                print(f"[store] bits={bits} layer {l+1}/{L}  {time.time()-t0:.0f}s", flush=True)
+                print(f"[store] bits={bits} layer {l + 1}/{L}  {time.time() - t0:.0f}s", flush=True)
         if path:
             st._save(path)
         return st
@@ -83,7 +97,7 @@ class ExpertStore:
         a = self.host.numpy()
         with open(path + ".tmp", "wb") as f:
             for i in range(0, a.shape[0], rows):
-                f.write(memoryview(a[i:i + rows]))
+                f.write(memoryview(a[i : i + rows]))
         os.replace(path + ".tmp", path)
         print(f"[store] saved {path}", flush=True)
 
@@ -92,5 +106,5 @@ class ExpertStore:
         t = time.time()
         with open(path, "rb") as f:
             for i in range(0, a.shape[0], rows):
-                f.readinto(memoryview(a[i:i + rows]))
-        print(f"[store] loaded {path} in {time.time()-t:.0f}s", flush=True)
+                f.readinto(memoryview(a[i : i + rows]))
+        print(f"[store] loaded {path} in {time.time() - t:.0f}s", flush=True)
